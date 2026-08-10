@@ -99,16 +99,25 @@ START=$(date +%s.%N)
 
 # curl 把数据流交给 pv；pv 每秒把瞬时速率打印一次（用 \r 覆盖同一行），
 # 重定向到 RAW_LOG 后按 \r 拆分即可拿到每一秒的采样。
-# timeout 用来限制最长测试时间。
+# timeout 用来限制最长测试时间。加 -S 让 curl 即使在 -s 静默模式下也会把真正的错误信息打出来，
+# 方便区分「正常测完」和「中途断线/被 reset」这两种情况。
 set +e
 if [ "$TIME_LIMIT" = "0" ]; then
-    curl -s "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+    curl -sS "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
 else
-    timeout "${TIME_LIMIT}s" curl -s "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+    timeout "${TIME_LIMIT}s" curl -sS "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
 fi
+CURL_EXIT=${PIPESTATUS[0]}
 set -e
 
 END=$(date +%s.%N)
+
+if [ "$CURL_EXIT" -ne 0 ] && [ "$CURL_EXIT" -ne 124 ]; then
+    # 124 是 timeout 命令主动掐断的退出码，属于正常的"到时间停止"，不算异常。
+    # 其他非 0 退出码说明 curl 是被网络问题中断的（超时/连接被重置/DNS 失败等）。
+    echo "⚠️  提示：本次下载没有正常完成，curl 退出码 $CURL_EXIT（很可能是连接中途被断开/重置，" >&2
+    echo "    不是脚本的限时设置导致的）。下面的统计数据只反映断线之前的部分下载情况。" >&2
+fi
 
 # ---- 解析 pv 的输出 ----
 # 一行大概长这样: 123MiB 0:00:05 [24.6MiB/s]
