@@ -14,6 +14,13 @@ set -euo pipefail
 URL="${1:-https://sgp.proof.ovh.net/files/10Gb.dat}"
 TIME_LIMIT="${2:-30}"   # 最长测速秒数，避免大文件一直下到底；传 0 表示不限时，一直下到文件完整下载完
 
+# 可选：通过环境变量 SOCKS5_PROXY 走代理测速，方便对比"直连" vs "走 Worker 隧道"
+# 用法示例：SOCKS5_PROXY=socks5h://127.0.0.1:1080 ./speedtest.sh <url> <秒数>
+CURL_PROXY_ARGS=()
+if [ -n "${SOCKS5_PROXY:-}" ]; then
+    CURL_PROXY_ARGS=(-x "$SOCKS5_PROXY")
+fi
+
 # ---------------------------------------------------------------------------
 # 自动安装缺失依赖
 # ---------------------------------------------------------------------------
@@ -88,6 +95,11 @@ echo "======================================================"
 echo "开始测速..."
 echo "======================================================"
 echo "目标: $URL"
+if [ -n "${SOCKS5_PROXY:-}" ]; then
+    echo "代理: $SOCKS5_PROXY（走代理测速）"
+else
+    echo "代理: 无（直连测速）"
+fi
 if [ "$TIME_LIMIT" = "0" ]; then
     echo "最长测速时长: 不限时（会一直下到文件完整下载完）"
 else
@@ -103,9 +115,9 @@ START=$(date +%s.%N)
 # 方便区分「正常测完」和「中途断线/被 reset」这两种情况。
 set +e
 if [ "$TIME_LIMIT" = "0" ]; then
-    curl -sS "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+    curl -sS "${CURL_PROXY_ARGS[@]}" "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
 else
-    timeout "${TIME_LIMIT}s" curl -sS "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+    timeout "${TIME_LIMIT}s" curl -sS "${CURL_PROXY_ARGS[@]}" "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
 fi
 CURL_EXIT=${PIPESTATUS[0]}
 set -e
