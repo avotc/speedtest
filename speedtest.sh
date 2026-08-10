@@ -181,7 +181,47 @@ MIN=$(echo "$FLUC_RESULT" | grep '^MIN=' | cut -d= -f2)
 MAX=$(echo "$FLUC_RESULT" | grep '^MAX=' | cut -d= -f2)
 LIST=$(echo "$FLUC_RESULT" | grep '^LIST=' | cut -d= -f2-)
 
+# 用 unicode 方块字符（▁▂▃▄▅▆▇█）把每一秒的速度样本画成一条 sparkline 曲线，
+# 按 min~max 区间把每个样本映射到 8 个高度档位。
+# awk 在非 UTF-8 locale 下按字节而不是按字符处理多字节 unicode 字符串会出问题，
+# 所以这里让 awk 只算出 1~8 的档位数字，实际取字符交给 bash 数组来做，规避 locale 问题。
+BAR_INDEXES=$(awk -v min="$MIN" -v max="$MAX" '
+    function to_mb(s,   num, unit, mult) {
+        num = s + 0
+        unit = s
+        gsub(/^[0-9.]+/, "", unit)
+        if (unit == "B")   mult = 1/1024/1024
+        else if (unit == "KiB") mult = 1/1024
+        else if (unit == "MiB") mult = 1
+        else if (unit == "GiB") mult = 1024
+        else if (unit == "TiB") mult = 1024*1024
+        else mult = 1
+        return num * mult
+    }
+    {
+        n = split($0, parts, "[][]")
+        rate = parts[2]
+        gsub(/\/s$/, "", rate)
+        mbps = to_mb(rate) * 8
+        range = max - min
+        if (range <= 0) { idx = 8 }
+        else {
+            idx = int((mbps - min) / range * 7 + 0.5) + 1
+            if (idx < 1) idx = 1
+            if (idx > 8) idx = 8
+        }
+        printf "%d ", idx
+    }
+' "${RAW_LOG}.lines")
+
+BARS=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+SPARKLINE=""
+for idx in $BAR_INDEXES; do
+    SPARKLINE="${SPARKLINE}${BARS[$((idx - 1))]}"
+done
+
 echo "======================================================"
 printf "时间: %ss | 流量: %s MB | 速度: %s MB/s ( %s Mbps )\n" \
     "$ELAPSED" "$TOTAL_MB" "$AVG_MB_S" "$AVG_MBPS"
 echo "波动: ${LIST} (范围: ${MIN}-${MAX} Mbps)"
+echo "      ${SPARKLINE}"
