@@ -12,7 +12,7 @@
 set -euo pipefail
 
 URL="${1:-https://sgp.proof.ovh.net/files/10Gb.dat}"
-TIME_LIMIT="${2:-30}"   # 最长测速秒数，避免大文件一直下到底
+TIME_LIMIT="${2:-30}"   # 最长测速秒数，避免大文件一直下到底；传 0 表示不限时，一直下到文件完整下载完
 
 # ---------------------------------------------------------------------------
 # 自动安装缺失依赖
@@ -88,7 +88,11 @@ echo "======================================================"
 echo "开始测速..."
 echo "======================================================"
 echo "目标: $URL"
-echo "最长测速时长: ${TIME_LIMIT}s（到时间自动停止，不必等文件下完）"
+if [ "$TIME_LIMIT" = "0" ]; then
+    echo "最长测速时长: 不限时（会一直下到文件完整下载完）"
+else
+    echo "最长测速时长: ${TIME_LIMIT}s（到时间自动停止，不必等文件下完）"
+fi
 echo
 
 START=$(date +%s.%N)
@@ -97,7 +101,11 @@ START=$(date +%s.%N)
 # 重定向到 RAW_LOG 后按 \r 拆分即可拿到每一秒的采样。
 # timeout 用来限制最长测试时间。
 set +e
-timeout "${TIME_LIMIT}s" curl -s "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+if [ "$TIME_LIMIT" = "0" ]; then
+    curl -s "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+else
+    timeout "${TIME_LIMIT}s" curl -s "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev/null
+fi
 set -e
 
 END=$(date +%s.%N)
