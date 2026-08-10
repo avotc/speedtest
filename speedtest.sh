@@ -124,6 +124,7 @@ TOTAL_BYTES_STR=$(tail -n1 "${RAW_LOG}.lines" | awk '{print $1}')
 # 用 awk 统一做单位换算和所有数值计算，避免依赖 bc / python3
 RESULT=$(awk -v total="$TOTAL_BYTES_STR" -v start="$START" -v end="$END" '
     function to_mb(s,   num, unit, mult) {
+        gsub(/[ \t]/, "", s)   # pv 输出里数字和单位之间偶尔会带空格（比如 " 212 B/s"），先去掉再解析
         num = s + 0
         unit = s
         gsub(/^[0-9.]+/, "", unit)
@@ -148,6 +149,7 @@ IFS='|' read -r ELAPSED TOTAL_MB AVG_MB_S AVG_MBPS <<< "$RESULT"
 # 每一秒的瞬时速率（[xx.x MiB/s] 里的数字），转换成 Mbps，同时算出 min/max 和拼接波动数组
 FLUC_RESULT=$(awk '
     function to_mb(s,   num, unit, mult) {
+        gsub(/[ \t]/, "", s)   # pv 输出里数字和单位之间偶尔会带空格（比如 " 212 B/s"），先去掉再解析
         num = s + 0
         unit = s
         gsub(/^[0-9.]+/, "", unit)
@@ -165,14 +167,15 @@ FLUC_RESULT=$(awk '
         rate = parts[2]        # 例如 24.6MiB/s
         gsub(/\/s$/, "", rate)
         mbps = to_mb(rate) * 8
-        printf "%.2f\n", mbps
+        mbps_fmt = sprintf("%.2f", mbps)
+        printf "%s\n", mbps_fmt
         if (min == "" || mbps < min) min = mbps
         if (max == "" || mbps > max) max = mbps
-        list = (list == "" ? mbps" Mbps" : list ", " mbps" Mbps")
+        list = (list == "" ? mbps_fmt" Mbps" : list ", " mbps_fmt" Mbps")
     }
     END {
-        print "MIN=" min > "/dev/stderr"
-        print "MAX=" max > "/dev/stderr"
+        print "MIN=" sprintf("%.2f", min) > "/dev/stderr"
+        print "MAX=" sprintf("%.2f", max) > "/dev/stderr"
         print "LIST=[" list "]" > "/dev/stderr"
     }
 ' "${RAW_LOG}.lines" 2>&1 >/dev/null)
@@ -187,6 +190,7 @@ LIST=$(echo "$FLUC_RESULT" | grep '^LIST=' | cut -d= -f2-)
 # 所以这里让 awk 只算出 1~8 的档位数字，实际取字符交给 bash 数组来做，规避 locale 问题。
 BAR_INDEXES=$(awk -v min="$MIN" -v max="$MAX" '
     function to_mb(s,   num, unit, mult) {
+        gsub(/[ \t]/, "", s)   # pv 输出里数字和单位之间偶尔会带空格（比如 " 212 B/s"），先去掉再解析
         num = s + 0
         unit = s
         gsub(/^[0-9.]+/, "", unit)
