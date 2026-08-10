@@ -1,27 +1,88 @@
 #!/bin/bash
 # speedtest.sh —— 用 curl + pv 测下载速度，输出总体速度和逐秒波动
+# 依赖: curl, pv, awk（脚本会自动检测并尝试自动安装缺失的 pv）
 #
 # 用法:
 #   ./speedtest.sh [URL] [最长测试秒数]
 #
 # 示例:
 #   ./speedtest.sh https://sgp.proof.ovh.net/files/10Gb.dat 30
-#   （不传参数默认用下面 URL，默认最长测 30 秒就停，不用把 10GB 全下完）
+#   （不传参数默认用下面 URL，默认最长测 30 秒就停，不用把大文件全下完）
 
 set -euo pipefail
 
 URL="${1:-https://sgp.proof.ovh.net/files/10Gb.dat}"
 TIME_LIMIT="${2:-30}"   # 最长测速秒数，避免大文件一直下到底
 
-if ! command -v pv >/dev/null 2>&1; then
-    echo "缺少 pv 工具，请先安装：" >&2
-    echo "  Debian/Ubuntu: sudo apt install -y pv" >&2
-    echo "  CentOS/RHEL:   sudo yum install -y pv" >&2
-    exit 1
+# ---------------------------------------------------------------------------
+# 自动安装缺失依赖
+# ---------------------------------------------------------------------------
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    fi
 fi
 
+install_pkg() {
+    local pkg="$1"
+    echo "正在尝试自动安装依赖: $pkg ..." >&2
+
+    if command -v pkg >/dev/null 2>&1 && [ -d "${PREFIX:-/data/data/com.termux/files/usr}" ]; then
+        # Termux（安卓），没有 sudo，直接用 pkg
+        pkg install -y "$pkg"
+    elif command -v apt-get >/dev/null 2>&1; then
+        $SUDO apt-get update -qq && $SUDO apt-get install -y "$pkg"
+    elif command -v apt >/dev/null 2>&1; then
+        $SUDO apt update -qq && $SUDO apt install -y "$pkg"
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf install -y "$pkg"
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO yum install -y "$pkg"
+    elif command -v pacman >/dev/null 2>&1; then
+        $SUDO pacman -Sy --noconfirm "$pkg"
+    elif command -v apk >/dev/null 2>&1; then
+        $SUDO apk add --no-cache "$pkg"
+    elif command -v zypper >/dev/null 2>&1; then
+        $SUDO zypper install -y "$pkg"
+    elif command -v brew >/dev/null 2>&1; then
+        brew install "$pkg"
+    else
+        echo "找不到可用的包管理器，无法自动安装 $pkg，请手动安装后重试。" >&2
+        return 1
+    fi
+}
+
+ensure_cmd() {
+    local cmd="$1"
+    local pkg="${2:-$1}"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        if ! install_pkg "$pkg"; then
+            echo "自动安装 $pkg 失败，请手动安装：" >&2
+            echo "  Termux:        pkg install $pkg" >&2
+            echo "  Debian/Ubuntu: sudo apt install -y $pkg" >&2
+            echo "  CentOS/RHEL:   sudo yum install -y $pkg" >&2
+            echo "  macOS:         brew install $pkg" >&2
+            exit 1
+        fi
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "已尝试安装 $pkg，但仍未检测到 $cmd 命令，请手动检查安装情况。" >&2
+            exit 1
+        fi
+    fi
+}
+
+ensure_cmd curl
+ensure_cmd pv
+ensure_cmd awk
+
+# ---------------------------------------------------------------------------
+# 测速主流程
+# ---------------------------------------------------------------------------
+
 RAW_LOG=$(mktemp)
-trap 'rm -f "$RAW_LOG"' EXIT
+trap 'rm -f "$RAW_LOG" "${RAW_LOG}.lines"' EXIT
 
 echo "======================================================"
 echo "开始测速..."
@@ -40,53 +101,79 @@ timeout "${TIME_LIMIT}s" curl -s "$URL" | pv -f -i 1 -r -b -t 2>"$RAW_LOG" >/dev
 set -e
 
 END=$(date +%s.%N)
-ELAPSED=$(echo "$END - $START" | bc)
 
 # ---- 解析 pv 的输出 ----
 # 一行大概长这样: 123MiB 0:00:05 [24.6MiB/s]
-# 把 \r 换成 \n 后逐行取最后一条记录的累计流量，以及每一条记录的瞬时速率
 tr '\r' '\n' < "$RAW_LOG" | grep -E '\[.*B/s\]' > "${RAW_LOG}.lines" || true
 
+if [ ! -s "${RAW_LOG}.lines" ]; then
+    echo "没有采集到任何速度样本，可能是目标地址无法访问（比如刚才的 Connection reset）。" >&2
+    exit 1
+fi
+
 TOTAL_BYTES_STR=$(tail -n1 "${RAW_LOG}.lines" | awk '{print $1}')
-# pv -b 的累计流量单位可能是 B/KiB/MiB/GiB，这里统一转成 MB 展示
-convert_to_mb() {
-    local val="$1"
-    python3 - "$val" <<'PYEOF' 2>/dev/null || echo "0"
-import sys, re
-s = sys.argv[1]
-m = re.match(r'([\d.]+)\s*([A-Za-z]+)', s)
-if not m:
-    print("0"); sys.exit()
-num, unit = float(m.group(1)), m.group(2)
-mult = {"B":1/1024/1024, "KiB":1/1024, "MiB":1, "GiB":1024, "TiB":1024*1024}
-print(round(num * mult.get(unit, 1), 2))
-PYEOF
-}
 
-TOTAL_MB=$(convert_to_mb "$TOTAL_BYTES_STR")
-AVG_MBPS=$(echo "scale=2; $TOTAL_MB * 8 / $ELAPSED" | bc)
-AVG_MB_S=$(echo "scale=2; $TOTAL_MB / $ELAPSED" | bc)
+# 用 awk 统一做单位换算和所有数值计算，避免依赖 bc / python3
+RESULT=$(awk -v total="$TOTAL_BYTES_STR" -v start="$START" -v end="$END" '
+    function to_mb(s,   num, unit, mult) {
+        num = s + 0
+        unit = s
+        gsub(/^[0-9.]+/, "", unit)
+        if (unit == "B")   mult = 1/1024/1024
+        else if (unit == "KiB") mult = 1/1024
+        else if (unit == "MiB") mult = 1
+        else if (unit == "GiB") mult = 1024
+        else if (unit == "TiB") mult = 1024*1024
+        else mult = 1
+        return num * mult
+    }
+    BEGIN {
+        elapsed = end - start
+        total_mb = to_mb(total)
+        avg_mb_s = total_mb / elapsed
+        avg_mbps = avg_mb_s * 8
+        printf "%.2f|%.2f|%.2f|%.2f\n", elapsed, total_mb, avg_mb_s, avg_mbps
+    }
+')
+IFS='|' read -r ELAPSED TOTAL_MB AVG_MB_S AVG_MBPS <<< "$RESULT"
 
-# 每一秒的瞬时速率（[xx.x MiB/s] 里的数字），转换成 Mbps
-SPEEDS_MBPS=()
-while IFS= read -r line; do
-    rate=$(echo "$line" | grep -oE '\[[0-9.]+[A-Za-z]+/s\]' | tail -1 | tr -d '[]')
-    rate_num=$(echo "$rate" | grep -oE '^[0-9.]+')
-    rate_unit=$(echo "$rate" | grep -oE '[A-Za-z]+/s$' | sed 's#/s##')
-    mb=$(convert_to_mb "${rate_num}${rate_unit}")
-    mbps=$(echo "scale=2; $mb * 8" | bc)
-    SPEEDS_MBPS+=("$mbps")
-done < "${RAW_LOG}.lines"
-rm -f "${RAW_LOG}.lines"
+# 每一秒的瞬时速率（[xx.x MiB/s] 里的数字），转换成 Mbps，同时算出 min/max 和拼接波动数组
+FLUC_RESULT=$(awk '
+    function to_mb(s,   num, unit, mult) {
+        num = s + 0
+        unit = s
+        gsub(/^[0-9.]+/, "", unit)
+        if (unit == "B")   mult = 1/1024/1024
+        else if (unit == "KiB") mult = 1/1024
+        else if (unit == "MiB") mult = 1
+        else if (unit == "GiB") mult = 1024
+        else if (unit == "TiB") mult = 1024*1024
+        else mult = 1
+        return num * mult
+    }
+    {
+        line = $0
+        n = split(line, parts, "[][]")
+        rate = parts[2]        # 例如 24.6MiB/s
+        gsub(/\/s$/, "", rate)
+        mbps = to_mb(rate) * 8
+        printf "%.2f\n", mbps
+        if (min == "" || mbps < min) min = mbps
+        if (max == "" || mbps > max) max = mbps
+        list = (list == "" ? mbps" Mbps" : list ", " mbps" Mbps")
+    }
+    END {
+        print "MIN=" min > "/dev/stderr"
+        print "MAX=" max > "/dev/stderr"
+        print "LIST=[" list "]" > "/dev/stderr"
+    }
+' "${RAW_LOG}.lines" 2>&1 >/dev/null)
 
-MIN=$(printf '%s\n' "${SPEEDS_MBPS[@]}" | sort -n | head -1)
-MAX=$(printf '%s\n' "${SPEEDS_MBPS[@]}" | sort -n | tail -1)
+MIN=$(echo "$FLUC_RESULT" | grep '^MIN=' | cut -d= -f2)
+MAX=$(echo "$FLUC_RESULT" | grep '^MAX=' | cut -d= -f2)
+LIST=$(echo "$FLUC_RESULT" | grep '^LIST=' | cut -d= -f2-)
 
 echo "======================================================"
-printf "时间: %.2fs | 流量: %s MB | 速度: %s MB/s ( %s Mbps )\n" \
+printf "时间: %ss | 流量: %s MB | 速度: %s MB/s ( %s Mbps )\n" \
     "$ELAPSED" "$TOTAL_MB" "$AVG_MB_S" "$AVG_MBPS"
-
-# 拼波动数组
-FLUC=$(printf '%s Mbps, ' "${SPEEDS_MBPS[@]}")
-FLUC="[${FLUC%, }]"
-echo "波动: ${FLUC} (范围: ${MIN}-${MAX} Mbps)"
+echo "波动: ${LIST} (范围: ${MIN}-${MAX} Mbps)"
